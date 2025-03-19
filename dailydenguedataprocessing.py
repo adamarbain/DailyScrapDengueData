@@ -21,10 +21,8 @@ import folium
 import plotly.express as px
 import os
 import time
-from google.colab import drive
 from datetime import datetime
 import pytz
-import os
 
 """Updating Files in GitHub Repository
 
