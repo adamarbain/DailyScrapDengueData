@@ -24,23 +24,18 @@ import time
 from google.colab import drive
 from datetime import datetime
 import pytz
+import os
 
-"""Setup Google Drive
+"""Updating Files in GitHub Repository
 
 
 """
 
-# 📌 Step 1: Mount Google Drive
-drive.mount('/content/drive')
+# 📌 Step 1: Define paths relative to the GitHub repository
+dengue_hotspot_csv = "dengue_hotspot.csv"
+active_dengue_csv = "active_dengue.csv"
 
-# 📌 Step 2: Define file paths in Google Drive
-drive_folder = "/content/drive/MyDrive/Dengue_Data"
-os.makedirs(drive_folder, exist_ok=True)
-
-dengue_hotspot_csv = os.path.join(drive_folder, "dengue_hotspot.csv")
-active_dengue_csv = os.path.join(drive_folder, "active_dengue.csv")
-
-# 📌 Step 3: Helper function to save DataFrame to CSV
+# 📌 Step 2: Helper function to save DataFrame to CSV
 def save_to_csv(df, file_path):
     if df is not None:
         if os.path.exists(file_path):
