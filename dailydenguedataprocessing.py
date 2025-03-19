@@ -115,7 +115,7 @@ def process_api_1(response_json):
 
     return df
 
-def process_api_2(response_json, x_target=101.653045, y_target=3.122496, tolerance=0.1):
+def process_api_2(response_json, x_target=101.653045, y_target=3.122496, tolerance=0.045):
     """Process and visualize data for API 2 with interactive hover tooltips."""
     features = response_json.get("features", [])
 
