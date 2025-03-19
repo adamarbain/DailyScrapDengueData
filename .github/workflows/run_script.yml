@@ -32,11 +32,3 @@ jobs:
           git add *.csv
           git commit -m "Daily update from GitHub Actions" || echo "No changes to commit"
           git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:${{ github.ref_name }}
-
-      - name: Commit and Push Changes
-        run: |
-          git add *.csv
-          git commit -m "Daily update from GitHub Actions"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
