@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timedelta
 import pytz
 import json
+import csv
 
 """Weather API Functions for Open Meteo Integration"""
 
@@ -132,6 +133,75 @@ def fetch_weather_data_forecast(latitude, longitude, date, timezone="Asia/Singap
             print(f"Error processing forecast weather data for lat={latitude}, lon={longitude}, date={date}: {str(e)}")
             return {'humidity': None, 'temperature': None, 'rainfall': None}
 
+def fetch_weather_data_archive(latitude, longitude, date, timezone="Asia/Singapore", max_retries=3):
+    """
+    Fetch historical weather from Open-Meteo Archive API for a specific date and location.
+    Uses hourly humidity to compute daily average humidity, and daily precipitation_sum.
+    For temperature, prefers daily temperature_2m_mean, else average of max/min.
+    """
+    for attempt in range(max_retries):
+        try:
+            date_obj = datetime.strptime(date, '%d/%m/%Y')
+            formatted_date = date_obj.strftime('%Y-%m-%d')
+
+            base_url = "https://archive-api.open-meteo.com/v1/archive"
+            params = {
+                'latitude': latitude,
+                'longitude': longitude,
+                'start_date': formatted_date,
+                'end_date': formatted_date,
+                'timezone': timezone,
+                'daily': 'precipitation_sum,temperature_2m_mean,temperature_2m_max,temperature_2m_min',
+                'hourly': 'relative_humidity_2m'
+            }
+
+            response = requests.get(base_url, params=params, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+
+            weather_data = {
+                'humidity': None,
+                'temperature': None,
+                'rainfall': None
+            }
+
+            # Humidity from hourly average
+            if 'hourly' in data and 'relative_humidity_2m' in data['hourly']:
+                humidity_values = data['hourly']['relative_humidity_2m']
+                if humidity_values and all(v is not None for v in humidity_values):
+                    weather_data['humidity'] = sum(humidity_values) / len(humidity_values)
+
+            # Temperature from daily mean if available, else avg of max/min
+            if 'daily' in data:
+                daily = data['daily']
+                temp_mean = daily.get('temperature_2m_mean')
+                if temp_mean and len(temp_mean) > 0 and temp_mean[0] is not None:
+                    weather_data['temperature'] = temp_mean[0]
+                else:
+                    tmax = daily.get('temperature_2m_max')
+                    tmin = daily.get('temperature_2m_min')
+                    if tmax and tmin and len(tmax) > 0 and len(tmin) > 0 and tmax[0] is not None and tmin[0] is not None:
+                        weather_data['temperature'] = (tmax[0] + tmin[0]) / 2
+
+                precip = daily.get('precipitation_sum')
+                if precip and len(precip) > 0:
+                    weather_data['rainfall'] = precip[0]
+
+            return weather_data
+
+        except requests.exceptions.Timeout:
+            print(f"Archive API timeout on attempt {attempt + 1}/{max_retries} for lat={latitude}, lon={longitude}, date={date}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return {'humidity': None, 'temperature': None, 'rainfall': None}
+        except requests.exceptions.RequestException as e:
+            print(f"Archive API request failed for lat={latitude}, lon={longitude}, date={date}: {str(e)}")
+            return {'humidity': None, 'temperature': None, 'rainfall': None}
+        except Exception as e:
+            print(f"Error processing archive weather data for lat={latitude}, lon={longitude}, date={date}: {str(e)}")
+            return {'humidity': None, 'temperature': None, 'rainfall': None}
+
 """Updating Files in GitHub Repository
 
 
@@ -143,15 +213,44 @@ active_dengue_csv = "active_dengue.csv"
 
 # 📌 Step 2: Helper function to save DataFrame to CSV
 def save_to_csv(df, file_path):
-    if df is not None:
-        if os.path.exists(file_path):
-            df.to_csv(file_path, mode="a", header=False, index=False)  # Append mode
-            print(f"Data appended to {file_path}")
-        else:
-            df.to_csv(file_path, index=False)  # Create new file
-        print(f"Data saved to {file_path}")
-    else:
+    if df is None or len(df) == 0:
         print("No data to save.")
+        return
+
+    if os.path.exists(file_path):
+        # Read existing header to detect schema
+        try:
+            existing_columns = list(pd.read_csv(file_path, nrows=0).columns)
+        except Exception as e:
+            existing_columns = []
+
+        new_columns = list(df.columns)
+
+        if existing_columns:
+            # If schema changed, rewrite file with unified columns
+            if existing_columns != new_columns:
+                combined_columns = existing_columns + [c for c in new_columns if c not in existing_columns]
+
+                try:
+                    existing_df = pd.read_csv(file_path)
+                except Exception:
+                    existing_df = pd.DataFrame(columns=existing_columns)
+
+                existing_df = existing_df.reindex(columns=combined_columns)
+                df_to_save = df.reindex(columns=combined_columns)
+                combined_df = pd.concat([existing_df, df_to_save], ignore_index=True)
+                combined_df.to_csv(file_path, index=False)
+                print(f"Schema updated and data merged into {file_path}")
+            else:
+                df.to_csv(file_path, mode="a", header=False, index=False)
+                print(f"Data appended to {file_path}")
+        else:
+            df.to_csv(file_path, index=False)
+            print(f"Data saved to {file_path}")
+    else:
+        # New file - write with header
+        df.to_csv(file_path, index=False)
+        print(f"Data saved to {file_path}")
 
 """API 1 : Fetch UM Location from Idengue.com"""
 
@@ -453,6 +552,132 @@ def display_weather_summary(df, api_name):
             print(f"{col.capitalize()}: No data available")
     
     print("=" * 50)
+
+"""Backfill historical weather for existing CSVs"""
+
+def backfill_weather_for_csv(file_path, lon_col="x", lat_col="y", date_col="date", sleep_seconds=0.2):
+    """
+    Read an existing CSV (e.g., dengue_hotspot.csv), fetch historical weather
+    for each unique (lat, lon, date), and write back with humidity, temperature, rainfall.
+    """
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        return
+
+    # Robust read using csv module to handle mixed-width rows
+    try:
+        with open(file_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except Exception as e:
+        print(f"Failed to read {file_path}: {e}")
+        return
+
+    if not rows:
+        print(f"No rows found in {file_path}")
+        return
+
+    header = rows[0]
+    data_rows = rows[1:]
+
+    # Determine the maximum number of columns present across all rows
+    max_len = max(len(r) for r in ([header] + data_rows))
+
+    # If there are extra columns without header names, extend header
+    if max_len > len(header):
+        # Heuristically name extra columns as humidity, temperature, rainfall (in that order)
+        needed = max_len - len(header)
+        extras = []
+        candidates = ["humidity", "temperature", "rainfall"]
+        for i in range(needed):
+            extras.append(candidates[i] if i < len(candidates) else f"extra_{i}")
+        header = header + extras
+
+    # Normalize all data rows to the header length
+    normalized = []
+    for r in data_rows:
+        if len(r) < len(header):
+            r = r + [""] * (len(header) - len(r))
+        elif len(r) > len(header):
+            r = r[:len(header)]
+        normalized.append(r)
+
+    # Build DataFrame
+    df = pd.DataFrame(normalized, columns=header)
+
+    # Validate required columns
+    for required in [lon_col, lat_col, date_col]:
+        if required not in df.columns:
+            print(f"Missing required column '{required}' in {file_path}")
+            return
+
+    # Ensure weather columns exist
+    for col in ["humidity", "temperature", "rainfall"]:
+        if col not in df.columns:
+            df[col] = np.nan
+        else:
+            # Normalize empty strings to NaN so we don't mistake them as filled
+            df[col] = df[col].replace("", np.nan)
+
+    # Cache to avoid repeated API calls for the same (lat, lon, date)
+    weather_cache = {}
+
+    def cache_key(lat_val, lon_val, date_str):
+        try:
+            return (round(float(lat_val), 6), round(float(lon_val), 6), str(date_str))
+        except Exception:
+            return (str(lat_val), str(lon_val), str(date_str))
+
+    total_rows = len(df)
+    print(f"Starting weather backfill for {total_rows} rows in {file_path}...")
+
+    def is_filled(val):
+        return pd.notna(val) and str(val).strip() != ""
+
+    for idx, row in df.iterrows():
+        # Skip rows that already have non-empty weather values
+        if is_filled(row.get("humidity")) and is_filled(row.get("temperature")) and is_filled(row.get("rainfall")):
+            continue
+
+        lat_val = row[lat_col]
+        lon_val = row[lon_col]
+        date_str = row[date_col]
+
+        key = cache_key(lat_val, lon_val, date_str)
+
+        if key in weather_cache:
+            weather = weather_cache[key]
+        else:
+            # Use archive API for past dates backfill
+            weather = fetch_weather_data_archive(lat_val, lon_val, date_str)
+            weather_cache[key] = weather
+            time.sleep(sleep_seconds)
+
+        if isinstance(weather, dict):
+            df.at[idx, "humidity"] = weather.get("humidity")
+            df.at[idx, "temperature"] = weather.get("temperature")
+            df.at[idx, "rainfall"] = weather.get("rainfall")
+
+        if (idx + 1) % 200 == 0:
+            print(f"Processed {idx + 1}/{total_rows} rows...")
+
+    # Reorder columns to keep original first, then weather columns at the end (once each)
+    base_cols = [c for c in df.columns if c not in ["humidity", "temperature", "rainfall"]]
+    ordered_cols = base_cols + ["humidity", "temperature", "rainfall"]
+    df = df[ordered_cols]
+
+    # Write atomically
+    tmp_path = f"{file_path}.tmp"
+    try:
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, file_path)
+        print(f"Backfill completed and saved to {file_path}")
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 """Run daily data fetching with weather integration"""
 

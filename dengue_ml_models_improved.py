@@ -58,6 +58,64 @@ class ImprovedDengueMLModels:
         
         # Convert date to datetime
         self.df['date'] = pd.to_datetime(self.df['date'], format='%d/%m/%Y')
+
+        # Normalize column names if needed (support both x/y and centroid_x/centroid_y)
+        if 'centroid_x' not in self.df.columns and 'x' in self.df.columns:
+            self.df = self.df.rename(columns={'x': 'centroid_x', 'y': 'centroid_y'})
+        if 'location' not in self.df.columns and 'area' in self.df.columns:
+            self.df = self.df.rename(columns={'area': 'location'})
+
+        # Load hotspot data and merge as a binary feature
+        try:
+            hotspot_df = pd.read_csv('dengue_hotspot.csv')
+            # Parse date
+            hotspot_df['date'] = pd.to_datetime(hotspot_df['date'], format='%d/%m/%Y')
+            # Normalize columns if needed
+            if 'centroid_x' not in hotspot_df.columns and 'x' in hotspot_df.columns:
+                hotspot_df = hotspot_df.rename(columns={'x': 'centroid_x', 'y': 'centroid_y'})
+            if 'location' not in hotspot_df.columns and 'area' in hotspot_df.columns:
+                hotspot_df = hotspot_df.rename(columns={'area': 'location'})
+
+            # Create rounded coordinate columns to reduce precision mismatch
+            self.df['cx_round'] = self.df['centroid_x'].round(4)
+            self.df['cy_round'] = self.df['centroid_y'].round(4)
+            hotspot_df['cx_round'] = hotspot_df['centroid_x'].round(4)
+            hotspot_df['cy_round'] = hotspot_df['centroid_y'].round(4)
+
+            # Primary merge: date + rounded coordinates
+            hotspot_keys = hotspot_df[['cx_round', 'cy_round', 'date']].drop_duplicates()
+            hotspot_keys = hotspot_keys.assign(is_hotspot=1)
+            self.df = self.df.merge(hotspot_keys, on=['cx_round', 'cy_round', 'date'], how='left')
+            self.df['is_hotspot'] = self.df['is_hotspot'].fillna(0).astype(int)
+
+            # Fallback: if still zero matches, try merging on standardized location/state/date
+            if self.df['is_hotspot'].sum() == 0:
+                def _norm_text(s):
+                    return s.astype(str).str.strip().str.lower()
+                if 'location' in self.df.columns and 'location' in hotspot_df.columns:
+                    df_loc = self.df.copy()
+                    hs_loc = hotspot_df.copy()
+                    df_loc['location_norm'] = _norm_text(df_loc['location'])
+                    hs_loc['location_norm'] = _norm_text(hs_loc['location'])
+                    if 'state' in df_loc.columns and 'state' in hs_loc.columns:
+                        df_loc['state_norm'] = _norm_text(df_loc['state'])
+                        hs_loc['state_norm'] = _norm_text(hs_loc['state'])
+                        hs_keys2 = hs_loc[['location_norm', 'state_norm', 'date']].drop_duplicates().assign(is_hotspot2=1)
+                        df_loc = df_loc.merge(hs_keys2, on=['location_norm', 'state_norm', 'date'], how='left')
+                    else:
+                        hs_keys2 = hs_loc[['location_norm', 'date']].drop_duplicates().assign(is_hotspot2=1)
+                        df_loc = df_loc.merge(hs_keys2, on=['location_norm', 'date'], how='left')
+                    df_loc['is_hotspot2'] = df_loc['is_hotspot2'].fillna(0).astype(int)
+                    # Combine results back
+                    self.df['is_hotspot'] = np.maximum(self.df['is_hotspot'], df_loc['is_hotspot2'])
+
+            # Cleanup helper columns
+            self.df.drop(columns=['cx_round', 'cy_round'], inplace=True)
+            print(f"Hotspot feature merged. Hotspot days: {self.df['is_hotspot'].sum()} (of {len(self.df)})")
+        except Exception as e:
+            # If hotspot data is unavailable or malformed, default to 0
+            self.df['is_hotspot'] = 0
+            print(f"Warning: Failed to merge hotspot data ({e}). Proceeding without hotspot feature.")
         
         # Create additional features
         self.df['year'] = self.df['date'].dt.year
@@ -232,7 +290,7 @@ class ImprovedDengueMLModels:
         print("="*50)
         
         # Prepare features for Model 1 (without historical features initially)
-        basic_features = ['centroid_x', 'centroid_y', 'location_cluster', 'month', 'day_of_year']
+        basic_features = ['centroid_x', 'centroid_y', 'location_cluster', 'month', 'day_of_year', 'is_hotspot']
         
         X1 = self.df[basic_features].copy()
         y1 = self.df[self.target_column].copy()
@@ -323,7 +381,7 @@ class ImprovedDengueMLModels:
         
         # Prepare features for Model 2
         model2_features = ['centroid_x', 'centroid_y', 'humidity', 'temperature', 'rainfall',
-                          'month', 'day_of_year', 'location_cluster']
+                          'month', 'day_of_year', 'location_cluster', 'is_hotspot']
         
         X2 = self.df[model2_features].copy()
         y2 = self.df[self.target_column].copy()
