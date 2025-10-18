@@ -35,6 +35,7 @@ class DenguePredictionInterface:
         self.model2_feature_names = None
         self.kmeans = None
         self.df = None
+        self.hotspot_df = None
         
     def load_models(self):
         """
@@ -79,6 +80,23 @@ class DenguePredictionInterface:
             # Load data for location clustering
             self.df = pd.read_csv('active_dengue.csv')
             
+            # Load hotspot data for enhanced predictions
+            try:
+                self.hotspot_df = pd.read_csv('dengue_hotspot.csv')
+                # Parse date and normalize columns
+                self.hotspot_df['date'] = pd.to_datetime(self.hotspot_df['date'], format='%d/%m/%Y')
+                if 'centroid_x' not in self.hotspot_df.columns and 'x' in self.hotspot_df.columns:
+                    self.hotspot_df = self.hotspot_df.rename(columns={'x': 'centroid_x', 'y': 'centroid_y'})
+                if 'location' not in self.hotspot_df.columns and 'area' in self.hotspot_df.columns:
+                    self.hotspot_df = self.hotspot_df.rename(columns={'area': 'location'})
+                print("✅ Hotspot data loaded successfully!")
+            except FileNotFoundError:
+                print("⚠️  Warning: dengue_hotspot.csv not found. Predictions will not include hotspot information.")
+                self.hotspot_df = None
+            except Exception as e:
+                print(f"⚠️  Warning: Error loading hotspot data: {e}")
+                self.hotspot_df = None
+            
             # Train KMeans for location clustering
             self.kmeans = KMeans(n_clusters=10, random_state=42)
             self.kmeans.fit(self.df[['centroid_x', 'centroid_y']])
@@ -113,6 +131,45 @@ class DenguePredictionInterface:
             return False, "Latitude should be between 0.0 and 10.0 (Malaysia region)"
         
         return True, ""
+    
+    def is_location_hotspot(self, centroid_x, centroid_y, date=None):
+        """
+        Check if a location is a hotspot based on coordinates and optionally date
+        
+        Args:
+            centroid_x (float): Longitude coordinate
+            centroid_y (float): Latitude coordinate
+            date (datetime, optional): Date to check for hotspot status
+            
+        Returns:
+            int: 1 if hotspot, 0 if not hotspot
+        """
+        if self.hotspot_df is None:
+            return 0
+        
+        try:
+            # Round coordinates to reduce precision mismatch
+            cx_round = round(centroid_x, 4)
+            cy_round = round(centroid_y, 4)
+            
+            # Filter hotspot data by coordinates
+            hotspot_match = self.hotspot_df[
+                (self.hotspot_df['centroid_x'].round(4) == cx_round) &
+                (self.hotspot_df['centroid_y'].round(4) == cy_round)
+            ]
+            
+            # If date is provided, also filter by date
+            if date is not None:
+                hotspot_match = hotspot_match[
+                    self.hotspot_df['date'] == pd.to_datetime(date)
+                ]
+            
+            # Return 1 if any hotspot found, 0 otherwise
+            return 1 if len(hotspot_match) > 0 else 0
+            
+        except Exception as e:
+            print(f"Warning: Error checking hotspot status: {e}")
+            return 0
     
     def validate_weather_data(self, humidity, temperature, rainfall):
         """
@@ -163,15 +220,19 @@ class DenguePredictionInterface:
             current_month = now.month
             current_day_of_year = now.timetuple().tm_yday
             
+            # Check if location is a hotspot
+            is_hotspot = self.is_location_hotspot(centroid_x, centroid_y, now)
+            
             # Create feature vector based on the model's feature structure
             if self.model1_feature_names and len(self.model1_feature_names) > 5:
-                # Improved model with historical features
+                # Improved model with historical features and hotspot information
                 features = np.array([[
                     centroid_x,
                     centroid_y,
                     0,  # location_cluster (will be predicted)
                     current_month,  # month
                     current_day_of_year,  # day_of_year
+                    is_hotspot,  # is_hotspot
                     0,  # cases_lag_1 (no historical data available)
                     0,  # cases_lag_7
                     0,  # cases_lag_30
@@ -186,6 +247,7 @@ class DenguePredictionInterface:
                     0,  # location_cluster (will be predicted)
                     current_month,  # month
                     current_day_of_year,  # day_of_year
+                    is_hotspot,  # is_hotspot
                     0,  # cases_lag_1 (no historical data available)
                     0,  # cases_lag_7
                     0,  # cases_lag_30
@@ -225,10 +287,12 @@ class DenguePredictionInterface:
                     "centroid_x": centroid_x,
                     "centroid_y": centroid_y,
                     "month": current_month,
-                    "day_of_year": current_day_of_year
+                    "day_of_year": current_day_of_year,
+                    "is_hotspot": is_hotspot
                 },
                 "location_cluster": int(features[0, 2]),
-                "note": "This prediction uses the improved model with proper data splitting to avoid overfitting. Results are more realistic and trustworthy."
+                "is_hotspot": is_hotspot,
+                "note": "This prediction uses the improved model with proper data splitting and hotspot information. Results are more realistic and trustworthy."
             }
             
         except Exception as e:
@@ -267,6 +331,9 @@ class DenguePredictionInterface:
             current_month = now.month
             current_day_of_year = now.timetuple().tm_yday
             
+            # Check if location is a hotspot
+            is_hotspot = self.is_location_hotspot(centroid_x, centroid_y, now)
+            
             # Create feature vector
             features = np.array([[
                 centroid_x,
@@ -276,7 +343,8 @@ class DenguePredictionInterface:
                 rainfall,
                 current_month,  # month
                 current_day_of_year,  # day_of_year
-                0   # location_cluster (will be predicted)
+                0,  # location_cluster (will be predicted)
+                is_hotspot  # is_hotspot
             ]])
             
             # Predict location cluster
@@ -317,11 +385,13 @@ class DenguePredictionInterface:
                     "temperature": temperature,
                     "rainfall": rainfall,
                     "month": current_month,
-                    "day_of_year": current_day_of_year
+                    "day_of_year": current_day_of_year,
+                    "is_hotspot": is_hotspot
                 },
                 "location_cluster": int(features[0, 7]),
+                "is_hotspot": is_hotspot,
                 "weather_analysis": weather_analysis,
-                "note": "This prediction uses the improved model with proper data splitting and weather conditions. Results are more realistic and trustworthy."
+                "note": "This prediction uses the improved model with proper data splitting, weather conditions, and hotspot information. Results are more realistic and trustworthy."
             }
             
         except Exception as e:
@@ -399,10 +469,10 @@ class DenguePredictionInterface:
             print("="*40)
             print("1. Model 1: Historical Cases Model (Improved)")
             print("   (Requires: Longitude, Latitude)")
-            print("   ✅ R² Score: ~0.96 (Gradient Boosting)")
+            # print("   ✅ R² Score: ~0.96 (Gradient Boosting)")
             print("2. Model 2: Weather-based Model (Improved)")
             print("   (Requires: Longitude, Latitude, Humidity, Temperature, Rainfall)")
-            print("   ✅ R² Score: ~0.95 (Gradient Boosting)")
+            # print("   ✅ R² Score: ~0.95 (Gradient Boosting)")
             print("3. Exit")
             
             choice = input("\nEnter your choice (1-3): ").strip()
@@ -492,6 +562,7 @@ class DenguePredictionInterface:
         print(f"Risk Level: {result['risk_level']}")
         print(f"Confidence: {result['confidence']}")
         print(f"Location Cluster: {result['location_cluster']}")
+        print(f"Hotspot Status: {'🔥 Hotspot' if result.get('is_hotspot', 0) == 1 else '✅ Not Hotspot'}")
         
         if 'weather_analysis' in result:
             print("\n🌤️  WEATHER ANALYSIS:")
